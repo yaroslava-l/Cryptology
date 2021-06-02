@@ -4,7 +4,7 @@ import java.util.BitSet;
 public class DES {
     BitSet[] keys;
     public DES(String key) {
-        keys = initializeKeyFromString(key);
+        keys = initializeSubKeys(key);
     }
 
     // Private Constants
@@ -133,9 +133,31 @@ public class DES {
         return decodeBlocks(cryptBlocks, keys);
     }
 
-    // Private static Logic Methods
-    private static BitSet[] initializeKeyFromString(String strKey) {
-        return initializeSubKeys(createSingleKey(strKey.getBytes()));
+    //Create 16 keys for 16 rounds from a permuted key
+    private static BitSet[] initializeSubKeys(String strKey) {
+        byte[] key = createSingleKey(strKey.getBytes());
+        BitSet keyBits = BitSet.valueOf(key);
+
+        // Split into C0, D0, which is Left half and Right half respectively, into 28-bit Keys
+        BitSet[] C = new BitSet[17];
+        BitSet[] D = new BitSet[17];
+        C[0] = keyBits.get(28, 56);
+        D[0] = keyBits.get(0, 28);
+
+        // Shift C and D to the left for 16 times, each times store as a key
+        for (int i = 1; i <= 16; i++) {
+            C[i] =  shiftLeft(C[i - 1], KEY_LEFTSHIFT_DISTANCES[i - 1], 28);
+            D[i] =  shiftLeft(D[i - 1], KEY_LEFTSHIFT_DISTANCES[i - 1], 28);
+        }
+
+        // Finalize 16 of 28-bit Keys from C and D into 48-bit Keys
+        BitSet[] finalKeys = new BitSet[17];
+        for (int i = 1; i <= 16; i++) {
+            BitSet concatCiDi =  concatenateBitSets(28, D[i], C[i]);
+            finalKeys[i] = permute(concatCiDi, PERMUTED_CHOICE_2); // Becomes 48-bit key
+        }
+
+        return finalKeys;
     }
 
     /*
@@ -150,7 +172,7 @@ public class DES {
         return permutedKeyBits.toByteArray();
     }
 
-    // Perform Permutation on a BitSet through a permute table.
+    //Permutation on a BitSet through a permute table.
     private static BitSet permute(BitSet originalBitSet, byte[] permuteTable) {
         BitSet newBitSet = new BitSet();
         for (int i = 0; i < permuteTable.length; i++) {
@@ -181,7 +203,7 @@ public class DES {
         return bitOf32s;
     }
 
-    // Perform Substitution through a supplied S-Box
+    //Substitution through a supplied S-Box
     private static BitSet substitute(BitSet originalBitSet, byte[][] subBox) {
         BitSet rowBits = new BitSet();
         BitSet colBits = new BitSet();
@@ -192,72 +214,41 @@ public class DES {
         }
 
         byte sBoxValue = subBox[ getSingleValue(rowBits)][ getSingleValue(colBits)];
-        BitSet newBitSet = BitSet.valueOf(new byte[]{sBoxValue});
 
-        return newBitSet;
+        return BitSet.valueOf(new byte[]{sBoxValue});
     }
 
-    //Create 16 keys for 16 rounds from a permuted key
-    private static BitSet[] initializeSubKeys(byte[] key) {
-        BitSet keyBits = BitSet.valueOf(key);
 
-        // Split into C0, D0, which is Left half and Right half respectively, into 28-bit Keys
-        BitSet[] C = new BitSet[17];
-        BitSet[] D = new BitSet[17];
-        C[0] = keyBits.get(28, 56);
-        D[0] = keyBits.get(0, 28);
+    // encrypt n blocks of input.
+    private static byte[] encodeBlocks(byte[][] blocks, BitSet[] keys) {
+        byte[][] encryptedBlocks = new byte[blocks.length][8];
+        return encode(blocks, keys, encryptedBlocks);
+    }
 
-        // Shift C and D to the left for 16 times, each times store as a key
+    //decrypt n blocks of input.
+    private static byte[] decodeBlocks(byte[][] blocks, BitSet[] keys) {
+        byte[][] decryptedBlocks = new byte[blocks.length][8];
+
+        // Decode is essentially Encode with SubKeys in reversed order => create reversedKeys
+        BitSet[] reversedKeys = new BitSet[17];
         for (int i = 1; i <= 16; i++) {
-            C[i] =  shiftLeft(C[i - 1], KEY_LEFTSHIFT_DISTANCES[i - 1], 28);
-            D[i] =  shiftLeft(D[i - 1], KEY_LEFTSHIFT_DISTANCES[i - 1], 28);
+            reversedKeys[i] = keys[16 - i + 1];
         }
-
-        // Finalize 16 of 28-bit Keys from C and D into 48-bit Keys
-        BitSet[] finalKeys = new BitSet[17];
-        for (int i = 1; i <= 16; i++) {
-            BitSet concatCiDi =  concatenateBitSets(28, D[i], C[i]);
-            finalKeys[i] = permute(concatCiDi, PERMUTED_CHOICE_2); // Becomes 48-bit key
-        }
-
-        return finalKeys;
+        return encode(blocks, reversedKeys, decryptedBlocks);
     }
 
-    //Divide the initial input into 8-byte (64-bit) blocks.Empty bit will be replaced with Padding Bit, "0"
-    private static byte[][] generateBlocks(byte[] inputBits) {
-        byte[][] blocks = new byte[(int) Math.ceil(inputBits.length * 1.0 / BYTE_SIZE)][];
-        int blockIndex = 0;
-        int bitIndex = 0;
-        for (int i = 0; i < inputBits.length; i++) {
-            if (bitIndex == 0) {
-                blocks[blockIndex] = new byte[BYTE_SIZE];
-            }
-            blocks[blockIndex][bitIndex++] = inputBits[i];
-            if (bitIndex >= BYTE_SIZE) {
-                blockIndex++;
-                bitIndex = 0;
-            }
+    private static byte[] encode(byte[][] blocks, BitSet[] keys, byte[][] encryptedBlocks) {
+        BitSet encrypted = new BitSet();
+        for (int i = 0; i < blocks.length; i++) {
+            encryptedBlocks[i] = desMainFlow(blocks[i], keys);
+            encrypted = i == 0
+                    ? BitSet.valueOf(encryptedBlocks[i])
+                    :  concatenateBitSets(64 * i, encrypted, BitSet.valueOf(encryptedBlocks[i]));
         }
-        for (int i = inputBits.length; i % BYTE_SIZE != 0; i++) {
-            // Padding
-            blocks[blockIndex][bitIndex++] = 0;
-        }
-        return blocks;
+        return encrypted.toByteArray();
     }
 
-    //fiestel function
-    private static BitSet f_function(BitSet rightBits, BitSet key) {
-        BitSet bitOf48s;
-        // Expand from 32-bit to 48 bit
-        bitOf48s = permute(rightBits, E);
-
-        // XOR with key (48-bit)
-        bitOf48s.xor(key);
-
-        return STransformation(bitOf48s);
-    }
-
-    // DES's main flow of encrypting/decrypting a single Block
+    //encrypting/decrypting block
     private static byte[] desMainFlow(byte[] block, BitSet[] keys) {
         BitSet bits = BitSet.valueOf(block);
 
@@ -283,40 +274,43 @@ public class DES {
         return bits.toByteArray();
     }
 
-    //Perform encrypt n blocks of input.
-    private static byte[] encodeBlocks(byte[][] blocks, BitSet[] keys) {
-        byte[][] encryptedBlocks = new byte[blocks.length][8];
-        BitSet encrypted = new BitSet();
-        return encode(blocks, keys, encryptedBlocks);
+    //fiestel function
+    private static BitSet f_function(BitSet rightBits, BitSet key) {
+        BitSet bitOf48s;
+        // Expand from 32-bit to 48 bit
+        bitOf48s = permute(rightBits, E);
+
+        // XOR with key (48-bit)
+        bitOf48s.xor(key);
+
+        return STransformation(bitOf48s);
     }
 
-
-
-    //Perform decrypt n blocks of input.
-    private static byte[] decodeBlocks(byte[][] blocks, BitSet[] keys) {
-        byte[][] decryptedBlocks = new byte[blocks.length][8];
-
-        // Decode is essentially Encode with SubKeys in reversed order => create reversedKeys
-        BitSet[] reversedKeys = new BitSet[17];
-        for (int i = 1; i <= 16; i++) {
-            reversedKeys[i] = keys[16 - i + 1];
+    //Divide the initial input into 8-byte (64-bit) blocks.Empty bit will be replaced with Padding Bit, "0"
+    private static byte[][] generateBlocks(byte[] inputBits) {
+        byte[][] blocks = new byte[(int) Math.ceil(inputBits.length * 1.0 / BYTE_SIZE)][];
+        int blockIndex = 0;
+        int bitIndex = 0;
+        for (int i = 0; i < inputBits.length; i++) {
+            if (bitIndex == 0) {
+                blocks[blockIndex] = new byte[BYTE_SIZE];
+            }
+            blocks[blockIndex][bitIndex++] = inputBits[i];
+            if (bitIndex >= BYTE_SIZE) {
+                blockIndex++;
+                bitIndex = 0;
+            }
         }
-        return encode(blocks, reversedKeys, decryptedBlocks);
-    }
-
-    private static byte[] encode(byte[][] blocks, BitSet[] keys, byte[][] encryptedBlocks) {
-        BitSet encrypted = new BitSet();
-        for (int i = 0; i < blocks.length; i++) {
-            encryptedBlocks[i] = desMainFlow(blocks[i], keys);
-            encrypted = i == 0
-                    ? BitSet.valueOf(encryptedBlocks[i])
-                    :  concatenateBitSets(64 * i, encrypted, BitSet.valueOf(encryptedBlocks[i]));
+        for (int i = inputBits.length; i % BYTE_SIZE != 0; i++) {
+            // Padding
+            blocks[blockIndex][bitIndex++] = 0;
         }
-        return encrypted.toByteArray();
+        return blocks;
     }
 
 
-        public static BitSet shiftLeft(BitSet b, int amount, int size) {
+
+    public static BitSet shiftLeft(BitSet b, int amount, int size) {
             BitSet result = new BitSet(size);
 
             for (int i = b.nextSetBit(0); i != -1; i = b.nextSetBit(i + 1)) {
@@ -326,8 +320,8 @@ public class DES {
             return result;
         }
 
-        //Concatenate a list of BitSet.
-        public static BitSet concatenateBitSets(int size, BitSet... bitSets) {
+    //Concatenate a list of BitSet.
+    public static BitSet concatenateBitSets(int size, BitSet... bitSets) {
             BitSet finalBitSet = new BitSet();
 
             int loopCount = 0;
@@ -345,11 +339,13 @@ public class DES {
             return finalBitSet;
         }
 
-        public static byte getSingleValue(BitSet bitSet) {
+    public static byte getSingleValue(BitSet bitSet) {
             byte[] byteArr = bitSet.toByteArray();
             if (byteArr.length == 0) {
                 return 0;
             }
             return byteArr[0];
         }
+
+
 }
